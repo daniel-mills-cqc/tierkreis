@@ -30,6 +30,8 @@ from tierkreis.core.tierkreis_struct import TierkreisStruct
 from tierkreis.core.types import TierkreisType
 from tierkreis.worker.namespace import Namespace
 from tierkreis.worker.prelude import start_worker_server
+from pytket.utils import get_pauli_expectation_value
+from pytket.pauli import QubitPauliString
 
 root = Namespace()
 namespace = root["pytket"]
@@ -104,6 +106,29 @@ async def compile_circuits(
     return list(map(_dump_circstruct, pycircs))
 
 
+from pytket.extensions.qiskit import AerBackend  # type: ignore
+from pytket.extensions.qiskit import IBMQEmulatorBackend
+from pytket.extensions.myqos import Myqos, MyqosBackend
+from pytket.extensions.myqos import QuantinuumConfig
+
+myqos = Myqos()
+
+configuration = QuantinuumConfig(device_name="H1-1E", user_group="DEFAULT")
+my_experiment = myqos.get_experiment_by_name("heterogeneous_qc")
+# backend = MyqosBackend(configuration, experiment=my_experiment, remote=True)
+
+available_backends: Dict[str, Callable[..., Backend]] = {
+    "AerBackend": AerBackend(),
+    "Nairobi": IBMQEmulatorBackend(
+        hub='ibm-q',
+        group='open',
+        project='main',
+        backend_name="ibm_nairobi",
+    ),
+    "H1": MyqosBackend(configuration, experiment=my_experiment, remote=True),
+}
+
+
 @namespace.function()
 async def execute_circuits(
     circuits: list[CircStruct],
@@ -111,16 +136,42 @@ async def execute_circuits(
     backend_name: str,
 ) -> List[SampledDistribution]:
 
-    from pytket.extensions.qiskit import AerBackend  # type: ignore
-
-    available_backends: Dict[str, Callable[..., Backend]] = {
-        "AerBackend": AerBackend,
-    }
-
-    backend = available_backends[backend_name]()
+    backend = available_backends[backend_name]
     circuits = backend.get_compiled_circuits(list(map(_load_circstruct, circuits)))
     handles = backend.process_circuits(circuits, n_shots=shots)
     return [backres_to_sampleddist(res) for res in backend.get_results(handles)]
+
+
+@namespace.function()
+async def pauli_expectation(
+    circuits: list[CircStruct],
+    shots: list[int],
+    paulis: list[str],
+    backend_name: str,
+) -> list[float]:
+
+    assert len(shots) == len(paulis)
+    assert len(shots) == len(circuits)
+
+    qps_dict_list = [json.loads(qps_str) for qps_str in paulis]
+    qps_list = [QubitPauliString().from_list(qps_dict) for qps_dict in qps_dict_list]
+
+    backend = available_backends[backend_name]
+    circuits = list(map(_load_circstruct, circuits))
+
+    for circuit in circuits:
+        print("circuit", *circuit, sep='\n')
+
+    return [
+        get_pauli_expectation_value(
+            state_circuit=state_circuit,
+            pauli=pauli,
+            backend=backend,
+            n_shots=n_shots,
+        )
+        for state_circuit, pauli, n_shots
+        in zip(circuits, qps_list, shots)
+    ]
 
 
 @namespace.function()
